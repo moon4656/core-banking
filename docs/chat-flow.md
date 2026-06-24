@@ -1,135 +1,228 @@
-# Chat Flow
+﻿# Chat Flow
 
-채팅 화면에서 사용자가 질문을 보낸 뒤, Leader Agent가 어떤 순서로 메모리, 의도, Concept, Agent, Tool, Evidence, 최종 답변을 처리하는지 설명한다.
+이 문서는 현재 구현 기준으로 `POST /api/v1/ai/chat` 요청이 어떤 순서로 처리되는지 설명한다.
+
+기준 파일:
+
+- `backend/app/api/routes/ai_gateway.py`
+- `backend/app/agents/leader.py`
+- `backend/app/agents/memory.py`
+- `backend/app/agents/long_term_memory.py`
+- `backend/app/agents/agent_registry.py`
+- `backend/app/agents/services/*`
+- `backend/app/tools/tool_gateway.py`
+- `backend/app/trace/*`
 
 ---
 
 ## 전체 흐름
 
 ```text
-User Input
+User / Frontend
   -> POST /api/v1/ai/chat
   -> AI Gateway
-  -> Leader Agent
+  -> LeaderAgent.run()
      1. Short Memory Load
      2. Long-term Memory Load
-     3. Intent Analysis
-     4. Concept Detection + Expansion
-     5. Agent Routing
-     6. Sub-Agent / Tool Execution
-     7. Re-ranking
-     8. Final Answer Generation
-     9. Evidence Linking
-    10. LeaderDecision / DecisionTrace Save
-    11. Long-term Summary Build
-    12. Short Memory Save
-    13. Long-term Memory Save
-    14. Decision Graph Build
+     3. Pending Clarification Check
+     4. Intent Analysis
+     5. Concept Resolution
+     6. Agent Routing
+     7. Missing Slot Clarification Check
+     8. Execution Step Build
+     9. Sub-Agent / Tool Execution
+    10. Evidence Save + Link
+    11. Execution Plan Finalize
+    12. Result Re-ranking
+    13. Answer Compose
+    14. Validation / Sanitization
+    15. Short Memory Save
+    16. Long-term Memory Save
+    17. LeaderDecision Save
+    18. decision_v2 Build
   -> ChatResponse
 ```
 
 ---
 
-## 1. Chat UI
+## 1. Entry Point
 
-- Frontend: `http://localhost:13000/ai/chat`
-- Backend Swagger: `http://localhost:18000/docs`
-- 요청 예시:
+엔드포인트:
+
+- `POST /api/v1/ai/chat`
+
+구현 파일:
+
+- [ai_gateway.py](/C:/temp/core-banking/backend/app/api/routes/ai_gateway.py)
+
+입력 스키마:
 
 ```json
 {
-  "message": "신용대출 금리와 필요서류 알려줘",
-  "session_id": "user-001",
+  "message": "신용대출 금리 알려줘",
+  "session_id": "demo-session-1",
   "channel": "web",
   "user_id": null
 }
 ```
 
-같은 `session_id`를 쓰면 Short Memory와 Long-term Memory가 이어진다.
+주요 처리:
+
+- `request_id` 생성
+- `REQUEST_RECEIVED` trace 기록
+- `LeaderAgent.run(...)` 호출
+- 완료 후 `RESPONSE_COMPLETED` trace 기록
+- `trace_count`, `evidence_count`를 계산해서 응답에 포함
+
+권한:
+
+- `require_analyst_context` 적용
+- `AUTH_ENABLED=false`면 개발 환경에서 사실상 관리자처럼 동작
 
 ---
 
-## 2. AI Gateway
+## 2. ChatRequest / ChatResponse
 
-파일: [backend/app/api/routes/ai_gateway.py](../backend/app/api/routes/ai_gateway.py)
+스키마 파일:
 
-- `request_id` 생성
-- `REQUEST_RECEIVED` trace 저장
-- `LeaderAgent.run()` 호출
-- 완료 후 `RESPONSE_COMPLETED` trace 저장
+- [ai_gateway.py](/C:/temp/core-banking/backend/app/schemas/ai_gateway.py)
+
+응답 주요 필드:
+
+- `request_id`
+- `message`
+- `plan`
+- `results`
+- `answer`
+- `intent`
+- `memory_turns`
+- `trace_count`
+- `evidence_count`
+- `decision_v2`
+- `needs_clarification`
+- `clarification_question`
+
+즉, 현재 채팅 응답은 단순 답변 문자열만 반환하는 것이 아니라 실행 계획과 추적 메타데이터도 함께 반환한다.
 
 ---
 
 ## 3. Short Memory Load
 
-파일: [backend/app/agents/memory.py](../backend/app/agents/memory.py)
+구현 파일:
 
-- Redis key: `session:{session_id}:history`
-- 최근 최대 5턴 저장
-- 실제 원문 메시지 형태로 로드
-- TTL: 1시간
+- [memory.py](/C:/temp/core-banking/backend/app/agents/memory.py)
 
-Trace:
+동작:
 
-- `MEMORY_LOADED`
-- `output_data.turns_loaded`
+- Redis에서 `session:{session_id}:history` 조회
+- 최근 대화 턴을 리스트 형태로 복원
+- 최대 5턴까지 유지
+- Redis TTL은 3600초
+
+Leader 처리:
+
+- `history = load_history(session_id)`
+- `memory_turns = len(history) // 2`
+- `MEMORY_LOADED` trace 기록
+
+세션 ID가 없거나 Redis가 실패하면 빈 히스토리로 계속 진행한다.
 
 ---
 
 ## 4. Long-term Memory Load
 
-파일: [backend/app/agents/long_term_memory.py](../backend/app/agents/long_term_memory.py)
+구현 파일:
 
-- PostgreSQL `long_term_memory` 테이블 조회
-- 최근 최대 5턴 로드
-- 저장된 `question_summary`, `answer_summary`, `intent`, `keywords`, `concepts`를 사용
+- [long_term_memory.py](/C:/temp/core-banking/backend/app/agents/long_term_memory.py)
 
-Trace:
+동작:
 
-- `LTM_LOADED`
-- `output_data.ltm_turns_loaded`
+- PostgreSQL의 장기 메모리 레코드 조회
+- `user_id`가 있으면 사용자 기준, 없으면 `session_id` 기준 fallback
+- 최근 최대 5건 로드
+- 각 항목에는 `intent`, `concepts`, `keywords`, `question`, `answer` 요약이 포함
+
+Leader 처리:
+
+- `load_long_term_history(db, session_id, user_id=owner_name)`
+- `LTM_LOADED` trace 기록
 
 ---
 
-## 5. Intent Analysis
+## 5. Pending Clarification Check
 
-파일: [backend/app/agents/leader.py](../backend/app/agents/leader.py)
+구현 파일:
 
-- `_analyze_intent()`에서 GPT-4o 사용
-- 입력:
-  - 현재 질문
-  - Short Memory 최근 대화
-  - Long-term Memory 패턴 힌트
-- 출력:
-  - `intent`
-  - `keywords`
-  - `urgency`
+- `backend/app/agents/services/clarification_service_adapter.py`
+- `backend/app/agents/leader.py`
+
+동작:
+
+- 같은 `session_id`에 미해결 clarification이 있으면 먼저 해소를 시도한다.
+- 사용자의 추가 입력이 보충 답변으로 판단되면 원 질문과 합쳐서 계속 처리한다.
+- 아직 정보가 부족하면 clarification 질문을 그대로 반환한다.
+
+이 경우 응답 특징:
+
+- `needs_clarification = true`
+- `clarification_question` 포함
+- `plan.steps`는 비어 있을 수 있음
+
+또한 clarification 질문도 short memory에 저장한다.
+
+---
+
+## 6. Intent Analysis
+
+구현 파일:
+
+- [leader.py](/C:/temp/core-banking/backend/app/agents/leader.py)
+
+핵심 메서드:
+
+- `_analyze_intent(...)`
+
+동작:
+
+- 현재 질문
+- short memory
+- long-term memory
+
+를 바탕으로 다음 정보를 만든다.
+
+- `intent`
+- `keywords`
+- 추가 분석 필드
 
 Trace:
 
 - `INTENT_ANALYZED`
 
-Decision Trace:
+참고:
 
-- `intent_analysis.intent`
-- `intent_analysis.confidence`
-- `intent_analysis.keywords`
-- `intent_analysis.reason`
+- `OPENAI_API_KEY`가 없으면 일부 분석은 fallback 경로로 동작할 수 있다.
 
 ---
 
-## 6. Concept Detection And Expansion
+## 7. Concept Resolution
 
-파일:
+구현 파일:
 
-- [backend/app/agents/leader.py](../backend/app/agents/leader.py)
-- [backend/app/knowledge/concept_service.py](../backend/app/knowledge/concept_service.py)
+- `backend/app/agents/services/concept_resolution_service.py`
+- `backend/app/knowledge/concept_service.py`
+- `backend/app/agents/leader.py`
 
 동작:
 
-1. 질문 본문과 intent keyword를 검색어로 사용
-2. `business_concept`에서 direct concept 탐지
-3. `business_concept_relation`에서 weight 기준으로 expanded concept 추가
+- 질문과 intent keyword를 기반으로 direct concept 탐지
+- 필요 시 relation / synonym 기반 concept 확장
+- direct concept와 expanded concept를 분리해 관리
+
+Leader 결과 변수:
+
+- `detected`
+- `all_concepts`
+- `detected_set`
 
 Trace:
 
@@ -138,21 +231,26 @@ Trace:
 - `expanded_concepts`
 - `total_concepts`
 
-Decision Trace:
-
-- `concepts[].detection_stage`
-- `concepts[].confidence`
-- `concepts[].reason`
-
 ---
 
-## 7. Agent Routing
+## 8. Agent Routing
 
-파일: [backend/app/agents/agent_registry.py](../backend/app/agents/agent_registry.py)
+구현 파일:
 
-- `agent_concept_mapping` 기반
-- LLM이 Agent를 임의 선택하지 않음
-- `LEADER_AGENT`는 오케스트레이터이며 Sub Agent 선택 목록에 포함되지 않음
+- [agent_registry.py](/C:/temp/core-banking/backend/app/agents/agent_registry.py)
+- `backend/app/agents/services/routing_policy.py`
+
+동작:
+
+1. `agent_concept_mapping` 기반 기본 라우팅
+2. `RoutingPolicy`가 내부 rule로 보정
+3. concept 분류 결과와 answer slot 후보 생성
+
+중요 원칙:
+
+- Agent는 LLM이 임의로 고르지 않는다.
+- 기본 라우팅은 DB 매핑을 따른다.
+- 현재 활성 Sub Agent는 `PRODUCT`, `RATE`, `POLICY`, `SEARCH`, `FOREX`, `NOTIFICATION`이다.
 
 Trace:
 
@@ -160,290 +258,329 @@ Trace:
 - `routed_agents`
 - `unrouted_concepts`
 
-Decision Trace:
+---
 
-- `agent_selection.selected_agents`
-- `agent_selection.rejected_agents`
-- `leader_decision.direct_concepts`
-- `leader_decision.expanded_concepts`
+## 9. Missing Slot Clarification Check
+
+라우팅 직후, 실행 전에 한 번 더 clarification 여부를 판단한다.
+
+동작:
+
+- 질문 의도에 비해 필요한 슬롯이 빠졌는지 점검
+- 예를 들어 금액, 통화, 등급, 상품 유형 같은 정보가 부족하면 질문을 되묻는다
+
+이 경로로 빠질 경우:
+
+- Sub-Agent 실행 없이 종료될 수 있다
+- `needs_clarification = true`
+- clarification 질문이 short memory에 저장된다
 
 ---
 
-## 8. Sub-Agent And Tool Execution
+## 10. Execution Step Build
 
-파일:
+구현 파일:
 
-- [backend/app/agents/leader.py](../backend/app/agents/leader.py)
-- 각 Sub Agent 파일
-- Tool Gateway
+- `backend/app/agents/services/execution_planner.py`
 
-실행:
+동작:
 
-- Route 결과에 따라 Sub Agent 실행
-- 각 Agent는 Tool Gateway를 통해 Mock API 호출
-- 성공 결과는 Evidence로 저장
+- 라우팅 결과를 바탕으로 `ExecutionStep` 목록 생성
+- 각 step은 `agent_id`, `concept_id`, `api_id`, `params`를 가진다
+- 현재 질문에서 어떤 Tool을 실제로 칠지 결정하는 단계다
 
-대표 Tool:
+Leader 처리:
 
-- `MOCK_PRODUCT_LOOKUP`
-- `MOCK_RATE_LOOKUP`
-- `MOCK_POLICY_LOOKUP`
-- `MOCK_DOCUMENT_SEARCH`
+- `steps, seen_apis = self._execution_planner.build_steps(...)`
+- 이후 `ExecutionPlan` 객체를 조립한다
+
+---
+
+## 11. Sub-Agent / Tool Execution
+
+구현 파일:
+
+- [leader.py](/C:/temp/core-banking/backend/app/agents/leader.py)
+- `backend/app/agents/*.py`
+- `backend/app/tools/tool_gateway.py`
+
+동작:
+
+- 라우팅된 각 Agent에 대해 해당 API 목록을 전달
+- Agent는 `AgentInput`을 받아 `run()` 수행
+- Agent 내부에서 ToolGateway를 통해 Mock API 호출
+- 결과는 `StepResult` 리스트로 누적
+
+현재 대표 Tool 범위:
+
+- 대출: `MOCK_PRODUCT_LOOKUP`, `MOCK_RATE_LOOKUP`, `MOCK_POLICY_LOOKUP`
+- 검색/자격: `MOCK_DOCUMENT_SEARCH`, `MOCK_ELIGIBILITY_CHECK`, `MOCK_COUNSELING_HISTORY`, `MOCK_BRANCH_LOOKUP`
+- 금리 계산: `MOCK_RATE_SIMULATION`, `MOCK_PERSONALIZED_RATE_LOOKUP`
+- 외환: `MOCK_EXCHANGE_RATE_LOOKUP`, `MOCK_CURRENCY_EXCHANGE_CALC`, `MOCK_FOREIGN_REMITTANCE`, `MOCK_FOREIGN_DEPOSIT_RATE`
+- 알림: `MOCK_NOTIFICATION_RULES`, `MOCK_NOTIFICATION_SEND`
+
+Trace:
+
+- API 호출마다 `TOOL_INVOKED`
+
+---
+
+## 12. Evidence Save And Link
+
+구현 파일:
+
+- `backend/app/trace/evidence_service.py`
+- `backend/app/trace/evidence_scorer.py`
+
+동작:
+
+- 성공한 Tool 결과는 evidence 후보로 저장
+- `request_id`, `concept_id`, `source_id`, `agent_id`와 함께 점수화
+- 이후 같은 요청 내 evidence를 `link_related_evidence(...)`로 연결
+
+응답에서는 직접 evidence 본문이 오지 않지만 다음 필드는 제공된다.
+
+- `evidence_count`
+
+세부 evidence 조회 API:
+
+- `GET /api/v1/ai/traces/{request_id}/evidence`
+
+---
+
+## 13. Execution Plan Finalize
+
+실행이 끝난 뒤 Leader는 최종 `plan` 객체를 만든다.
+
+포함 정보:
+
+- `request_id`
+- `message`
+- `detected_concepts`
+- `routed_agents`
+- `steps`
 
 Trace:
 
 - `PLAN_CREATED`
-- `TOOL_INVOKED`
 
-Decision Trace:
+주의:
 
-- `tool_executions[].tool_name`
-- `tool_executions[].input_summary`
-- `tool_executions[].output_summary`
-- `tool_executions[].latency_ms`
+- 코드상 `PLAN_CREATED`는 실제 step 실행 이후 기록되지만, 의미상으로는 이번 요청의 실행 계획 확정 이벤트로 볼 수 있다.
 
 ---
 
-## 9. Re-ranking
+## 14. Result Re-ranking
 
-파일: [backend/app/agents/leader.py](../backend/app/agents/leader.py)
+구현 파일:
 
-- 성공 여부
-- 데이터 충실도
-- intent relevance
-
-를 기준으로 결과를 정렬한다.
-
-Trace:
-
-- `RESULTS_RERANKED`
-
-Decision Trace:
-
-- `reranking.criteria_weights`
-- `reranking.candidates`
-- `reranking.selected_evidence_ids`
-- `reranking.reason`
-
----
-
-## 10. Final Answer
-
-파일: [backend/app/agents/leader.py](../backend/app/agents/leader.py)
-
-- 입력:
-  - intent
-  - Short Memory
-  - Long-term Memory
-  - reranked tool result
-- GPT-4o 사용 가능 시 자연어 답변 생성
-- 실패 시 fallback 답변 사용
-
-Decision Trace:
-
-- `final_answer.answer`
-- `final_answer.answer_summary`
-- `final_answer.used_evidence_ids`
-- `final_answer.grounding_summary`
-
----
-
-## 11. Evidence Linking
-
-파일: [backend/app/trace/evidence_service.py](../backend/app/trace/evidence_service.py)
-
-- 같은 `request_id` 기준으로 evidence 간 연관 관계를 연결
-- concept relation
-- shared product id
-
-등을 기반으로 관련 evidence를 묶는다.
-
----
-
-## 12. LeaderDecision And DecisionTrace Save
-
-파일:
-
-- [backend/app/agents/leader.py](../backend/app/agents/leader.py)
-- [backend/app/services/decision_trace_service.py](../backend/app/services/decision_trace_service.py)
-
-저장 대상:
-
-- `leader_decision`
-- `ai_decision_trace`
-- `ai_concept_detection`
-- `ai_agent_selection`
-- `ai_tool_execution`
-- `ai_reranking_trace`
-- `ai_final_answer_trace`
-
-운영 화면은 이 canonical decision trace를 읽어 Summary / Trace / Evidence 화면을 구성한다.
-
----
-
-## 13. Long-term Summary Build
-
-파일: [backend/app/agents/leader.py](../backend/app/agents/leader.py)
-
-함수:
-
-- `_summarize_for_long_term()`
+- `backend/app/agents/leader.py`
 
 동작:
 
-- 현재 질문과 최종 답변을 Long-term Memory 저장용으로 별도 요약
-- LLM 사용 가능 시 JSON 형태의 `question_summary`, `answer_summary` 생성
-- 실패하거나 비활성화면 fallback으로 공백 정리 후 길이 제한 저장
+- raw Tool 결과를 intent와 질의 focus 기준으로 다시 정렬
+- 특정 질문에서는 관련 없는 API 결과를 답변에서 약화 또는 제외
+- 예: 환전 계산 질문에서는 일반 환율 목록보다 계산 결과를 우선
 
-중요:
-
-- 이전 구현은 사실상 단순 절단에 가까웠음
-- 현재는 요약 전용 단계를 분리해 저장 흐름에 포함함
+이 단계는 현재 별도 trace event 이름으로 직접 기록되지는 않지만, 최종 `results`는 rerank 이후 목록이다.
 
 ---
 
-## 14. Short Memory Save
+## 15. Answer Compose
 
-파일: [backend/app/agents/memory.py](../backend/app/agents/memory.py)
+구현 파일:
+
+- `backend/app/agents/services/answer_composer.py`
+- `backend/app/agents/leader.py`
 
 동작:
 
-- `save_turn(session_id, message, answer)`
-- Redis에 user / assistant 메시지 1턴 저장
+- classified concept와 ranked result를 바탕으로 answer slot을 구성
+- `self._summarize(...)`를 통해 최종 자연어 답변 생성
+- short memory와 long-term memory가 답변 맥락에 반영될 수 있다
+
+현재 응답의 `answer`는 이 단계 결과다.
+
+---
+
+## 16. Validation And Sanitization
+
+구현 파일:
+
+- `backend/app/agents/validator.py`
+
+동작:
+
+- 최종 답변과 evidence 결과를 바탕으로 안전성 / grounding / 권한 관련 검사를 수행
+- 필요하면 `sanitized_answer`로 교체
+- `risk_flags`, `actions_taken`, `requires_disclaimer`는 `decision_v2`에 반영
+
+예:
+
+- 참고용 안내 문구 추가
+- 사용자 권한에 맞지 않는 표현 완화
+
+---
+
+## 17. Memory Save
+
+### Short Memory Save
+
+구현 파일:
+
+- [memory.py](/C:/temp/core-banking/backend/app/agents/memory.py)
+
+동작:
+
+- `save_turn(session_id, message, answer)` 호출
+- user / assistant 메시지를 쌍으로 저장
 - 최근 5턴만 유지
 
-Trace:
+주의:
 
-- `MEMORY_SAVED`
-- 저장 결과 payload:
-  - `saved`
-  - `stored_turns`
-  - `preview`
+- 현재 코드에서는 저장은 수행하지만 별도 `MEMORY_SAVED` trace를 직접 남기지는 않는다.
 
----
+### Long-term Memory Save
 
-## 15. Long-term Memory Save
+구현 파일:
 
-파일: [backend/app/agents/long_term_memory.py](../backend/app/agents/long_term_memory.py)
+- [long_term_memory.py](/C:/temp/core-banking/backend/app/agents/long_term_memory.py)
 
 동작:
 
-- `save_long_term_memory(...)`
-- PostgreSQL `long_term_memory`에 저장
-- 저장 필드:
-  - `intent`
+- 질문/답변 요약을 장기 메모리로 저장
+- `intent`, `detected_concepts`, `keywords`도 함께 남김
+- 실패해도 채팅 응답 자체는 계속 반환된다
+
+주의:
+
+- 현재 코드에서는 저장은 수행하지만 별도 `LTM_SAVED` trace를 직접 남기지는 않는다.
+
+---
+
+## 18. LeaderDecision Save
+
+구현 파일:
+
+- `backend/app/models/trace_model.py`
+- `backend/app/agents/leader.py`
+
+동작:
+
+- `LeaderDecision` 레코드 저장
+- 핵심 저장 항목:
+  - `detected_intent`
   - `detected_concepts`
-  - `keywords`
-  - `question_summary`
-  - `answer_summary`
-  - `turn_index`
+  - `direct_concepts`
+  - `expanded_concepts`
+  - `selected_agents`
+  - `confidence_score`
+  - `total_steps`
+  - `memory_turns`
+  - `ltm_turns`
+  - `answer`
 
-Trace:
-
-- `LTM_SAVED`
-- 저장 결과 payload:
-  - `saved`
-  - `turn_index`
-  - `question_summary`
-  - `answer_summary`
+이 정보는 trace 요약, decision 화면, 운영 분석 화면에서 사용된다.
 
 ---
 
-## 16. Decision Graph Build
+## 19. decision_v2 Build
 
-파일:
+구현 파일:
 
-- [backend/app/agents/graph_builder.py](../backend/app/agents/graph_builder.py)
-- [backend/app/api/routes/decisions.py](../backend/app/api/routes/decisions.py)
+- `backend/app/agents/leader.py`
+- `backend/app/schemas/decision_trace.py`
 
-기본 노드:
+동작:
 
-- `USER_QUERY`
-- `MEMORY_HINT`
-- `INTENT`
-- `CONCEPT`
-- `LEADER_DECISION`
-- `SUB_AGENT`
-- `TOOL_CALL`
-- `RERANKING_SCORE`
-- `FINAL_RESPONSE`
+- 현재 요청의 판단 과정을 구조화된 스키마로 묶는다
+- 포함 정보:
+  - context loaded
+  - intent
+  - concept 분류
+  - decision rules applied
+  - selected / rejected agents
+  - execution strategy
+  - answer slots
+  - risk flags
+  - disclaimer 여부
 
-메모리 저장 추적:
-
-- `MEMORY_WRITE`
-- edge type: `SAVES_MEMORY`
-
-현재 구조:
-
-- Graph builder가 `MEMORY_WRITE`를 이해함
-- `/graph` API는 기존 데이터에 `MEMORY_WRITE`가 없을 경우 trace event 기반 fallback 합성을 수행함
-- 이미 `MEMORY_WRITE` 노드가 있으면 fallback을 추가하지 않음
-
-운영자가 그래프에서 확인 가능한 메모리 단계:
-
-1. Short Memory Load
-2. Long-term Memory Load
-3. Final Response
-4. Short Memory Save
-5. Long-term Memory Save
+이 값은 채팅 응답의 `decision_v2` 필드로 직접 내려간다.
 
 ---
 
-## 17. ChatResponse
-
-응답 예시:
+## 20. ChatResponse Example
 
 ```json
 {
   "request_id": "uuid-xxxx",
-  "message": "신용대출 금리와 필요서류 알려줘",
+  "message": "신용대출 금리 알려줘",
   "plan": {
+    "request_id": "uuid-xxxx",
+    "message": "신용대출 금리 알려줘",
     "detected_concepts": [
       "CONCEPT_PERSONAL_CREDIT_LOAN",
-      "CONCEPT_INTEREST_RATE",
-      "CONCEPT_REQUIRED_DOCUMENT"
+      "CONCEPT_INTEREST_RATE"
     ],
-    "routed_agents": ["PRODUCT_AGENT", "RATE_AGENT", "SEARCH_AGENT"],
-    "steps": []
+    "routed_agents": ["RATE_AGENT"],
+    "steps": [
+      {
+        "step_index": 0,
+        "agent_id": "RATE_AGENT",
+        "concept_id": "CONCEPT_INTEREST_RATE",
+        "api_id": "MOCK_RATE_LOOKUP",
+        "params": {}
+      }
+    ]
   },
-  "results": [],
-  "answer": "현재 신용대출 금리와 필요서류는 ...",
+  "results": [
+    {
+      "step_index": 0,
+      "api_id": "MOCK_RATE_LOOKUP",
+      "status": "success",
+      "data": {},
+      "error": null
+    }
+  ],
+  "answer": "신용대출 금리 안내입니다...",
   "intent": {
     "intent": "INQUIRY",
-    "keywords": ["신용대출", "금리", "필요서류"],
-    "urgency": "medium"
+    "keywords": ["신용대출", "금리"]
   },
   "memory_turns": 1,
-  "trace_count": 0,
-  "evidence_count": 0
+  "trace_count": 6,
+  "evidence_count": 1,
+  "decision_v2": {},
+  "needs_clarification": false,
+  "clarification_question": null
 }
 ```
 
 ---
 
-## 운영 화면과의 연결
+## 21. Related Read APIs
 
-### Decision Trace
+Trace / Evidence:
 
-- `/api/v1/ai/decisions/{request_id}/trace`
-- 질문, memory, intent, concept, agent reason, tool, reranking, final grounding 확인
+- `GET /api/v1/ai/traces`
+- `GET /api/v1/ai/traces/{request_id}`
+- `GET /api/v1/ai/traces/{request_id}/events`
+- `GET /api/v1/ai/traces/{request_id}/evidence`
 
-### Decision Graph
+Decision:
 
-- `/api/v1/ai/decisions/{request_id}/graph`
-- 파이프라인 시각화
-- `MEMORY_WRITE` 노드에서 메모리 저장 결과 확인 가능
+- `GET /api/v1/ai/decisions`
+- `GET /api/v1/ai/decisions/{request_id}/trace`
+- `GET /api/v1/ai/decisions/{request_id}/graph`
 
-### Pipeline Explorer
-
-- `/admin/pipeline`
-- 좌측 요청 목록, 우측 실행 흐름 요약
+운영 화면과 프론트는 위 API를 이용해 request별 파이프라인과 의사결정 정보를 보여준다.
 
 ---
 
-## 현재 구현 기준 주의사항
+## 22. 현재 문서 기준 주의사항
 
-1. `LEADER_AGENT`는 Sub Agent 미선택 목록에 노출하지 않는다.
-2. Long-term Memory는 원문 전체가 아니라 저장용 요약을 사용한다.
-3. Graph의 메모리 저장 단계는 trace event 기반 fallback이 남아 있어, 구버전 데이터도 화면에서 볼 수 있다.
-4. 메모리 저장 실패는 trace에 남지만 채팅 응답 자체를 막지는 않는다.
+1. 현재 구현은 초기 대출 전용 흐름보다 넓다. `forex`, `notification`도 같은 채팅 파이프라인을 탄다.
+2. clarification이 걸리면 Sub-Agent 실행 전에 응답이 끝날 수 있다.
+3. 메모리 저장은 수행되지만, 저장 성공 여부가 현재 trace event로 항상 직접 기록되지는 않는다.
+4. `results`는 raw Tool 결과가 아니라 rerank 이후 응답용 결과 목록이다.
+5. `decision_v2`는 채팅 응답에 직접 포함되며, 별도 decision trace API와는 용도가 다르다.
