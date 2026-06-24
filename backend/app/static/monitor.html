@@ -1,0 +1,1069 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Leader Agent 모니터링</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #212121;
+      color: #ececec;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── 상단 네비게이션 ── */
+    #topnav {
+      height: 48px;
+      background: #171717;
+      border-bottom: 1px solid #2a2a2a;
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      gap: 16px;
+      flex-shrink: 0;
+    }
+    #topnav .nav-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: #ececec;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    #topnav .nav-title span { font-size: 18px; }
+    #topnav .back-link {
+      margin-left: auto;
+      font-size: 13px;
+      color: #888;
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px 12px;
+      border-radius: 6px;
+      transition: background 0.15s, color 0.15s;
+    }
+    #topnav .back-link:hover { background: #2a2a2a; color: #ececec; }
+
+    /* ── 메인 레이아웃 ── */
+    #main {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* ── 왼쪽 패널 (트레이스 목록) ── */
+    #left-panel {
+      width: 300px;
+      flex-shrink: 0;
+      background: #171717;
+      border-right: 1px solid #2a2a2a;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #list-header {
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid #2a2a2a;
+    }
+    #list-header h2 {
+      font-size: 12px;
+      font-weight: 600;
+      color: #777;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 10px;
+    }
+
+    #filter-row {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+    .filter-btn {
+      padding: 4px 10px;
+      border-radius: 12px;
+      border: 1px solid #333;
+      background: transparent;
+      color: #888;
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .filter-btn:hover { border-color: #555; color: #ccc; }
+    .filter-btn.active { background: #10a37f22; border-color: #10a37f; color: #10a37f; }
+
+    #trace-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 6px 8px;
+    }
+    #trace-list::-webkit-scrollbar { width: 4px; }
+    #trace-list::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+    .trace-item {
+      padding: 10px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.15s;
+      margin-bottom: 2px;
+      border: 1px solid transparent;
+    }
+    .trace-item:hover { background: #252525; }
+    .trace-item.active { background: #1e2e28; border-color: #10a37f44; }
+
+    .trace-item-query {
+      font-size: 13px;
+      color: #d0d0d0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 5px;
+    }
+    .trace-item-meta {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* ── 상태 배지 ── */
+    .badge {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 10px;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+    }
+    .badge-completed  { background: #10a37f22; color: #10a37f; border: 1px solid #10a37f44; }
+    .badge-warning    { background: #f59e0b22; color: #f59e0b; border: 1px solid #f59e0b44; }
+    .badge-blocked    { background: #f8717122; color: #f87171; border: 1px solid #f8717144; }
+    .badge-processing { background: #6366f122; color: #818cf8; border: 1px solid #6366f144; }
+    .badge-failed     { background: #f8717122; color: #f87171; border: 1px solid #f8717144; }
+    .badge-unknown    { background: #33333322; color: #888;    border: 1px solid #33333344; }
+    .badge-pass    { background: #10a37f22; color: #10a37f; border: 1px solid #10a37f44; }
+    .badge-warn    { background: #f59e0b22; color: #f59e0b; border: 1px solid #f59e0b44; }
+    .badge-block   { background: #f8717122; color: #f87171; border: 1px solid #f8717144; }
+
+    .trace-item-time {
+      font-size: 11px;
+      color: #555;
+      margin-left: auto;
+    }
+
+    #list-footer {
+      padding: 10px 16px;
+      border-top: 1px solid #2a2a2a;
+      font-size: 11px;
+      color: #555;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    #auto-refresh-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #10a37f;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    /* ── 오른쪽 패널 (상세) ── */
+    #right-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* 빈 상태 */
+    #empty-state {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      color: #555;
+    }
+    #empty-state .empty-icon { font-size: 48px; }
+    #empty-state p { font-size: 14px; }
+
+    /* 상세 뷰 */
+    #detail-view { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+
+    /* 요청 헤더 카드 */
+    #request-header {
+      background: #1a1a1a;
+      border-bottom: 1px solid #2a2a2a;
+      padding: 16px 24px;
+      flex-shrink: 0;
+    }
+    #request-query {
+      font-size: 17px;
+      font-weight: 600;
+      color: #ececec;
+      margin-bottom: 10px;
+      line-height: 1.4;
+    }
+    #request-meta {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .meta-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      color: #888;
+    }
+    .meta-item strong { color: #aaa; }
+
+    /* Gate 바 */
+    #gate-bar {
+      background: #1e1e1e;
+      border-bottom: 1px solid #2a2a2a;
+      padding: 10px 24px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    #gate-bar .gate-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-right: 4px;
+    }
+    .gate-pill {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 12px;
+      border-radius: 16px;
+      font-size: 11px;
+      font-weight: 600;
+      border: 1px solid;
+    }
+    .gate-pill .gate-dot { width: 6px; height: 6px; border-radius: 50%; }
+    .gate-pill-pass  { background: #10a37f11; border-color: #10a37f44; color: #10a37f; }
+    .gate-pill-pass .gate-dot  { background: #10a37f; }
+    .gate-pill-warn  { background: #f59e0b11; border-color: #f59e0b44; color: #f59e0b; }
+    .gate-pill-warn .gate-dot  { background: #f59e0b; }
+    .gate-pill-block { background: #f8717111; border-color: #f8717144; color: #f87171; }
+    .gate-pill-block .gate-dot { background: #f87171; }
+
+    /* 탭 영역 */
+    #tab-nav {
+      background: #1a1a1a;
+      border-bottom: 1px solid #2a2a2a;
+      display: flex;
+      padding: 0 24px;
+      flex-shrink: 0;
+    }
+    .tab-btn {
+      padding: 12px 18px;
+      border: none;
+      background: transparent;
+      color: #777;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .tab-btn:hover { color: #ccc; }
+    .tab-btn.active { color: #10a37f; border-bottom-color: #10a37f; }
+
+    #tab-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 24px;
+    }
+    #tab-content::-webkit-scrollbar { width: 5px; }
+    #tab-content::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+
+    /* 공통 카드 */
+    .card {
+      background: #1e1e1e;
+      border: 1px solid #2a2a2a;
+      border-radius: 10px;
+      padding: 16px 20px;
+      margin-bottom: 14px;
+    }
+    .card-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 12px;
+    }
+
+    /* 키-값 그리드 */
+    .kv-grid {
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      gap: 8px 12px;
+    }
+    .kv-key {
+      font-size: 12px;
+      color: #777;
+    }
+    .kv-val {
+      font-size: 13px;
+      color: #ccc;
+      word-break: break-all;
+    }
+    .kv-val.highlight { color: #ececec; font-weight: 600; }
+    .kv-val.muted { color: #555; }
+
+    /* 테이블 */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .data-table th {
+      text-align: left;
+      padding: 8px 12px;
+      color: #666;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      border-bottom: 1px solid #2a2a2a;
+    }
+    .data-table td {
+      padding: 9px 12px;
+      color: #c0c0c0;
+      border-bottom: 1px solid #252525;
+      vertical-align: top;
+    }
+    .data-table tr:last-child td { border-bottom: none; }
+    .data-table tr:hover td { background: #252525; }
+
+    /* 신뢰도 바 */
+    .conf-bar-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .conf-bar {
+      height: 6px;
+      border-radius: 3px;
+      background: #2a2a2a;
+      width: 80px;
+      overflow: hidden;
+    }
+    .conf-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+    .conf-val { font-size: 11px; color: #aaa; }
+
+    /* Concept 상태 칩 */
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .chip-normal   { background: #10a37f18; color: #10a37f; }
+    .chip-low      { background: #f59e0b18; color: #f59e0b; }
+    .chip-selected { background: #10a37f18; color: #10a37f; }
+    .chip-excluded { background: #33333344; color: #666; }
+    .chip-success  { background: #10a37f18; color: #10a37f; }
+    .chip-error    { background: #f8717118; color: #f87171; }
+    .chip-grounded   { background: #10a37f18; color: #10a37f; }
+    .chip-ungrounded { background: #f8717118; color: #f87171; }
+
+    /* 태그 목록 */
+    .tag-list { display: flex; flex-wrap: wrap; gap: 4px; }
+    .tag {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background: #2a2a2a;
+      color: #888;
+      border: 1px solid #333;
+    }
+
+    /* 문장 카드 */
+    .sentence-card {
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin-bottom: 8px;
+    }
+    .sentence-card.ungrounded {
+      border-color: #f8717133;
+      background: #1e1a1a;
+    }
+    .sentence-text {
+      font-size: 13px;
+      color: #d0d0d0;
+      line-height: 1.5;
+      margin-bottom: 8px;
+    }
+    .sentence-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .sentence-evidence {
+      font-size: 11px;
+      color: #888;
+      margin-top: 4px;
+      font-style: italic;
+    }
+    .warning-msg {
+      font-size: 11px;
+      color: #f87171;
+      margin-top: 4px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    /* Gate 결과 카드 */
+    .gate-result-card {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      padding: 14px 16px;
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      margin-bottom: 8px;
+    }
+    .gate-result-icon { font-size: 22px; flex-shrink: 0; margin-top: 2px; }
+    .gate-result-body { flex: 1; }
+    .gate-result-name { font-size: 13px; font-weight: 600; color: #ccc; margin-bottom: 3px; }
+    .gate-result-condition { font-size: 11px; color: #666; margin-bottom: 5px; }
+    .gate-result-msg { font-size: 12px; color: #aaa; line-height: 1.4; }
+
+    /* JSON 표시 */
+    .json-block {
+      background: #161616;
+      border: 1px solid #2a2a2a;
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 11px;
+      color: #a0c4a0;
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    /* 빈 섹션 */
+    .empty-section {
+      text-align: center;
+      padding: 40px 20px;
+      color: #444;
+      font-size: 13px;
+    }
+
+    /* 로딩 */
+    .loading { color: #555; font-size: 13px; padding: 20px; text-align: center; }
+  </style>
+</head>
+<body>
+
+<!-- ── 상단 네비게이션 ── -->
+<nav id="topnav">
+  <div class="nav-title"><span>🔬</span> Leader Agent 모니터링</div>
+  <a class="back-link" href="/">← 챗봇으로 돌아가기</a>
+</nav>
+
+<!-- ── 메인 레이아웃 ── -->
+<div id="main">
+
+  <!-- ── 왼쪽 패널 ── -->
+  <div id="left-panel">
+    <div id="list-header">
+      <h2>요청 이력</h2>
+      <div id="filter-row">
+        <button class="filter-btn active" data-status="">전체</button>
+        <button class="filter-btn" data-status="completed">완료</button>
+        <button class="filter-btn" data-status="warning">경고</button>
+        <button class="filter-btn" data-status="blocked">차단</button>
+        <button class="filter-btn" data-status="processing">진행중</button>
+      </div>
+    </div>
+
+    <div id="trace-list">
+      <div class="loading">불러오는 중…</div>
+    </div>
+
+    <div id="list-footer">
+      <span id="list-count">—</span>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <div id="auto-refresh-dot"></div>
+        <span>3초 자동 갱신</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 오른쪽 패널 ── -->
+  <div id="right-panel">
+
+    <!-- 빈 상태 -->
+    <div id="empty-state">
+      <div class="empty-icon">🔍</div>
+      <p>왼쪽에서 요청을 선택하면 상세 정보가 표시됩니다.</p>
+    </div>
+
+    <!-- 상세 뷰 -->
+    <div id="detail-view">
+
+      <!-- 요청 헤더 -->
+      <div id="request-header">
+        <div id="request-query">—</div>
+        <div id="request-meta"></div>
+      </div>
+
+      <!-- Gate 바 -->
+      <div id="gate-bar">
+        <span class="gate-label">Gate</span>
+        <div id="gate-pills"></div>
+      </div>
+
+      <!-- 탭 네비게이션 -->
+      <div id="tab-nav">
+        <button class="tab-btn active" data-tab="intent">의미분석</button>
+        <button class="tab-btn" data-tab="concepts">Concept 탐지</button>
+        <button class="tab-btn" data-tab="routing">Agent Routing</button>
+        <button class="tab-btn" data-tab="tools">Tool 실행</button>
+        <button class="tab-btn" data-tab="sentences">최종 답변 근거</button>
+      </div>
+
+      <!-- 탭 콘텐츠 -->
+      <div id="tab-content">
+
+        <!-- Tab 1: 의미분석 -->
+        <div id="pane-intent" class="tab-pane active">
+          <div class="loading">로딩 중…</div>
+        </div>
+
+        <!-- Tab 2: Concept 탐지 -->
+        <div id="pane-concepts" class="tab-pane">
+          <div class="loading">로딩 중…</div>
+        </div>
+
+        <!-- Tab 3: Agent Routing -->
+        <div id="pane-routing" class="tab-pane">
+          <div class="loading">로딩 중…</div>
+        </div>
+
+        <!-- Tab 4: Tool 실행 -->
+        <div id="pane-tools" class="tab-pane">
+          <div class="loading">로딩 중…</div>
+        </div>
+
+        <!-- Tab 5: 최종 답변 근거 -->
+        <div id="pane-sentences" class="tab-pane">
+          <div class="loading">로딩 중…</div>
+        </div>
+
+      </div><!-- #tab-content -->
+    </div><!-- #detail-view -->
+
+  </div><!-- #right-panel -->
+</div><!-- #main -->
+
+<script>
+'use strict';
+
+// ── 상태 ──────────────────────────────────────────────────────────────────
+let currentFilter  = '';
+let currentTraceId = null;
+let currentDetail  = null;
+let activeTab      = 'intent';
+let latestKnown    = null;
+let allTraces      = [];
+
+// ── 유틸 ──────────────────────────────────────────────────────────────────
+function esc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+function relTime(isoStr) {
+  if (!isoStr) return '';
+  const diff = Date.now() - new Date(isoStr).getTime();
+  const s = Math.floor(diff / 1000);
+  if (s < 60)   return `${s}초 전`;
+  const m = Math.floor(s / 60);
+  if (m < 60)   return `${m}분 전`;
+  const h = Math.floor(m / 60);
+  if (h < 24)   return `${h}시간 전`;
+  return `${Math.floor(h/24)}일 전`;
+}
+
+function statusBadge(status) {
+  const cls = {
+    completed: 'badge-completed',  warning: 'badge-warning',
+    blocked:   'badge-blocked',    processing: 'badge-processing',
+    failed:    'badge-failed',
+  }[status] || 'badge-unknown';
+  const label = {
+    completed: '완료', warning: '경고', blocked: '차단',
+    processing: '진행중', failed: '실패',
+  }[status] || status;
+  return `<span class="badge ${cls}">${esc(label)}</span>`;
+}
+
+function confBar(val) {
+  const pct = Math.round((val || 0) * 100);
+  const color = val >= 0.7 ? '#10a37f' : val >= 0.5 ? '#f59e0b' : '#f87171';
+  return `<div class="conf-bar-wrap">
+    <div class="conf-bar"><div class="conf-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+    <span class="conf-val">${pct}%</span>
+  </div>`;
+}
+
+function gateResultIcon(result) {
+  return { PASS: '✅', WARNING: '⚠️', BLOCKED: '🚫' }[result] || '❓';
+}
+
+function gatePillClass(result) {
+  return { PASS: 'gate-pill-pass', WARNING: 'gate-pill-warn', BLOCKED: 'gate-pill-block' }[result] || 'gate-pill-pass';
+}
+
+// ── API ───────────────────────────────────────────────────────────────────
+async function fetchTraces(status = '', page = 1, size = 50) {
+  const params = new URLSearchParams({ page, size });
+  if (status) params.set('status', status);
+  const r = await fetch(`/api/v1/leader-agent/traces?${params}`);
+  if (!r.ok) throw new Error(`traces list ${r.status}`);
+  return r.json();
+}
+
+async function fetchDetail(requestId) {
+  const r = await fetch(`/api/v1/leader-agent/traces/${encodeURIComponent(requestId)}`);
+  if (!r.ok) throw new Error(`detail ${r.status}`);
+  return r.json();
+}
+
+async function fetchLatest() {
+  const r = await fetch('/api/v1/monitoring/latest');
+  if (!r.ok) return null;
+  const d = await r.json();
+  return d.request_id || null;
+}
+
+// ── 목록 렌더링 ──────────────────────────────────────────────────────────
+async function loadList(silent = false) {
+  if (!silent) {
+    document.getElementById('trace-list').innerHTML = '<div class="loading">불러오는 중…</div>';
+  }
+  try {
+    const data = await fetchTraces(currentFilter);
+    allTraces = data.items || [];
+    renderList(allTraces);
+    document.getElementById('list-count').textContent = `총 ${data.total}건`;
+  } catch (e) {
+    if (!silent) {
+      document.getElementById('trace-list').innerHTML = `<div class="loading" style="color:#f87171">로드 실패</div>`;
+    }
+  }
+}
+
+function renderList(items) {
+  const el = document.getElementById('trace-list');
+  if (!items.length) {
+    el.innerHTML = '<div class="empty-section">해당 조건의 트레이스가 없습니다.</div>';
+    return;
+  }
+  el.innerHTML = items.map(item => `
+    <div class="trace-item${item.request_id === currentTraceId ? ' active' : ''}"
+         data-id="${esc(item.request_id)}">
+      <div class="trace-item-query">${esc(item.original_query || '(질의 없음)')}</div>
+      <div class="trace-item-meta">
+        ${statusBadge(item.status)}
+        ${item.total_latency_ms ? `<span style="font-size:11px;color:#555">${item.total_latency_ms.toLocaleString()}ms</span>` : ''}
+        <span class="trace-item-time">${relTime(item.created_at)}</span>
+      </div>
+    </div>
+  `).join('');
+
+  el.querySelectorAll('.trace-item').forEach(el => {
+    el.addEventListener('click', () => selectTrace(el.dataset.id));
+  });
+}
+
+// ── 상세 로드 ─────────────────────────────────────────────────────────────
+async function selectTrace(requestId) {
+  currentTraceId = requestId;
+
+  // 목록 active 표시
+  document.querySelectorAll('.trace-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.id === requestId);
+  });
+
+  // 빈 상태 숨기고 상세 표시
+  document.getElementById('empty-state').style.display = 'none';
+  const detail = document.getElementById('detail-view');
+  detail.style.display = 'flex';
+
+  // 로딩 표시
+  document.getElementById('request-query').textContent = '불러오는 중…';
+  document.getElementById('request-meta').innerHTML = '';
+  document.getElementById('gate-pills').innerHTML = '';
+  ['intent','concepts','routing','tools','sentences'].forEach(t => {
+    document.getElementById(`pane-${t}`).innerHTML = '<div class="loading">로딩 중…</div>';
+  });
+
+  try {
+    const d = await fetchDetail(requestId);
+    currentDetail = d;
+    renderDetail(d);
+  } catch (e) {
+    document.getElementById('request-query').textContent = '로드 실패: ' + e.message;
+  }
+}
+
+function renderDetail(d) {
+  const { trace, intent, concepts, routing, tools, sentences, gates } = d;
+
+  // 헤더
+  document.getElementById('request-query').textContent = trace.original_query || '(질의 없음)';
+  document.getElementById('request-meta').innerHTML = `
+    <div class="meta-item">${statusBadge(trace.status)}</div>
+    ${trace.total_latency_ms != null ? `<div class="meta-item">⏱ <strong>${trace.total_latency_ms.toLocaleString()}ms</strong></div>` : ''}
+    ${trace.user_id ? `<div class="meta-item">👤 <strong>${esc(trace.user_id)}</strong></div>` : ''}
+    ${trace.session_id ? `<div class="meta-item">🔗 ${esc(trace.session_id)}</div>` : ''}
+    ${trace.created_at ? `<div class="meta-item">🕐 ${new Date(trace.created_at).toLocaleString('ko-KR')}</div>` : ''}
+    <div class="meta-item" style="font-size:10px;color:#444">${esc(trace.request_id)}</div>
+  `;
+
+  // Gate 바
+  renderGatePills(gates);
+
+  // 각 탭
+  renderIntentTab(intent);
+  renderConceptsTab(concepts, gates);
+  renderRoutingTab(routing, gates);
+  renderToolsTab(tools);
+  renderSentencesTab(sentences, gates);
+}
+
+// ── Gate 바 ───────────────────────────────────────────────────────────────
+function renderGatePills(gates) {
+  const gateNames = {
+    concept_confidence: 'Gate 1 · Concept 신뢰도',
+    agent_routing:      'Gate 2 · Agent 라우팅',
+    answer_grounding:   'Gate 3 · 답변 근거',
+  };
+  const el = document.getElementById('gate-pills');
+  if (!gates || !gates.length) {
+    el.innerHTML = '<span style="color:#444;font-size:12px">Gate 데이터 없음</span>';
+    return;
+  }
+  el.innerHTML = gates.map(g => {
+    const cls = gatePillClass(g.result);
+    const name = gateNames[g.gate_name] || g.gate_name;
+    return `<div class="gate-pill ${cls}">
+      <div class="gate-dot"></div>
+      ${esc(name)} · ${esc(g.result)}
+    </div>`;
+  }).join('');
+}
+
+// ── Tab 1: 의미분석 ───────────────────────────────────────────────────────
+function renderIntentTab(intent) {
+  const el = document.getElementById('pane-intent');
+  if (!intent) {
+    el.innerHTML = '<div class="empty-section">의도 분석 데이터가 없습니다.</div>';
+    return;
+  }
+  const secondary = (intent.secondary_intents || []);
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-title">의도 분석 결과</div>
+      <div class="kv-grid">
+        <span class="kv-key">주요 의도</span>
+        <span class="kv-val highlight">${esc(intent.primary_intent || '—')}</span>
+        <span class="kv-key">질의 유형</span>
+        <span class="kv-val">${esc(intent.query_type || '—')}</span>
+        <span class="kv-key">Tool 실행 필요</span>
+        <span class="kv-val">${intent.needs_tool_execution
+          ? '<span class="chip chip-selected">예</span>'
+          : '<span class="chip chip-excluded">아니오</span>'}</span>
+        <span class="kv-key">Memory 필요</span>
+        <span class="kv-val">${intent.needs_memory
+          ? '<span class="chip chip-selected">예</span>'
+          : '<span class="chip chip-excluded">아니오</span>'}</span>
+        <span class="kv-key">신뢰도</span>
+        <span class="kv-val">${intent.confidence != null ? confBar(intent.confidence) : '—'}</span>
+        <span class="kv-key">판단 근거</span>
+        <span class="kv-val">${esc(intent.reason || '—')}</span>
+      </div>
+    </div>
+    ${secondary.length ? `
+    <div class="card">
+      <div class="card-title">보조 의도</div>
+      <div class="tag-list">
+        ${secondary.map(s => `<span class="tag">${esc(s)}</span>`).join('')}
+      </div>
+    </div>` : ''}
+  `;
+}
+
+// ── Tab 2: Concept 탐지 ──────────────────────────────────────────────────
+function renderConceptsTab(concepts, gates) {
+  const el = document.getElementById('pane-concepts');
+  const gate1 = (gates || []).find(g => g.gate_name === 'concept_confidence');
+
+  if (!concepts || !concepts.length) {
+    el.innerHTML = '<div class="empty-section">탐지된 Concept이 없습니다.</div>';
+    return;
+  }
+  el.innerHTML = `
+    ${gate1 ? renderGateCard(gate1, 'Gate 1 · Concept 신뢰도 검사') : ''}
+    <div class="card" style="padding:0;overflow:hidden">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>소스 텍스트</th>
+            <th>Concept ID</th>
+            <th>유형</th>
+            <th>신뢰도</th>
+            <th>상태</th>
+            <th>확장 용어</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${concepts.map(c => `
+            <tr>
+              <td>${esc(c.source_text || '—')}</td>
+              <td style="font-size:11px;font-family:monospace;color:#888">${esc(c.concept_id || '—')}</td>
+              <td>${esc(c.concept_type || '—')}</td>
+              <td>${c.confidence != null ? confBar(c.confidence) : '—'}</td>
+              <td>${c.status === 'low_confidence'
+                ? '<span class="chip chip-low">낮은 신뢰도</span>'
+                : '<span class="chip chip-normal">정상</span>'}</td>
+              <td>
+                <div class="tag-list">
+                  ${(c.expanded_terms || []).map(t => `<span class="tag">${esc(t)}</span>`).join('') || '<span style="color:#444">—</span>'}
+                </div>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+// ── Tab 3: Agent Routing ──────────────────────────────────────────────────
+function renderRoutingTab(routing, gates) {
+  const el = document.getElementById('pane-routing');
+  const gate2 = (gates || []).find(g => g.gate_name === 'agent_routing');
+
+  if (!routing || !routing.length) {
+    el.innerHTML = '<div class="empty-section">라우팅 데이터가 없습니다.</div>';
+    return;
+  }
+
+  const selected = routing.filter(r => r.selected).sort((a, b) => (a.execution_order || 99) - (b.execution_order || 99));
+  const excluded = routing.filter(r => !r.selected);
+
+  el.innerHTML = `
+    ${gate2 ? renderGateCard(gate2, 'Gate 2 · Agent 라우팅 검사') : ''}
+    <div class="card">
+      <div class="card-title">선택된 Agent (${selected.length}개)</div>
+      ${selected.length === 0
+        ? '<div class="empty-section" style="padding:20px">선택된 Agent가 없습니다.</div>'
+        : `<table class="data-table">
+          <thead><tr><th>실행 순서</th><th>Agent ID</th><th>관련 Concept</th><th>신뢰도</th><th>선택 사유</th></tr></thead>
+          <tbody>
+            ${selected.map(r => `
+              <tr>
+                <td><span style="font-size:18px;font-weight:700;color:#10a37f">${r.execution_order || '—'}</span></td>
+                <td><strong>${esc(r.agent_name)}</strong></td>
+                <td><div class="tag-list">${(r.related_concepts||[]).map(c=>`<span class="tag">${esc(c)}</span>`).join('')}</div></td>
+                <td>${r.routing_confidence != null ? confBar(r.routing_confidence) : '—'}</td>
+                <td>${esc(r.reason || '—')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>`}
+    </div>
+    ${excluded.length ? `
+    <div class="card">
+      <div class="card-title">제외된 Agent (${excluded.length}개)</div>
+      <table class="data-table">
+        <thead><tr><th>Agent ID</th><th>제외 사유</th></tr></thead>
+        <tbody>
+          ${excluded.map(r => `
+            <tr>
+              <td><span style="color:#666">${esc(r.agent_name)}</span></td>
+              <td style="color:#666">${esc(r.reason || '—')}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>` : ''}
+  `;
+}
+
+// ── Tab 4: Tool 실행 ──────────────────────────────────────────────────────
+function renderToolsTab(tools) {
+  const el = document.getElementById('pane-tools');
+
+  if (!tools || !tools.length) {
+    el.innerHTML = '<div class="empty-section">실행된 Tool이 없습니다.</div>';
+    return;
+  }
+
+  el.innerHTML = tools.map((t, i) => `
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+        <div style="font-size:14px;font-weight:600;color:#ccc">${esc(t.tool_name || '—')}</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          ${t.latency_ms != null ? `<span style="font-size:11px;color:#666">⏱ ${t.latency_ms}ms</span>` : ''}
+          ${t.status === 'success'
+            ? '<span class="chip chip-success">✓ 성공</span>'
+            : `<span class="chip chip-error">✗ ${esc(t.status||'실패')}</span>`}
+        </div>
+      </div>
+      <div class="kv-grid">
+        <span class="kv-key">담당 Agent</span>
+        <span class="kv-val">${esc(t.agent_name || '—')}</span>
+        <span class="kv-key">출력 요약</span>
+        <span class="kv-val">${esc(t.output_summary || '—')}</span>
+        ${t.retry_count ? `<span class="kv-key">재시도 횟수</span><span class="kv-val" style="color:#f59e0b">${t.retry_count}회</span>` : ''}
+        ${t.error_message ? `<span class="kv-key">오류 메시지</span><span class="kv-val" style="color:#f87171">${esc(t.error_message)}</span>` : ''}
+      </div>
+      ${t.tool_input ? `
+      <div style="margin-top:12px">
+        <div class="card-title" style="margin-bottom:6px">입력 파라미터</div>
+        <div class="json-block">${esc(JSON.stringify(t.tool_input, null, 2))}</div>
+      </div>` : ''}
+    </div>
+  `).join('');
+}
+
+// ── Tab 5: 최종 답변 근거 ────────────────────────────────────────────────
+function renderSentencesTab(sentences, gates) {
+  const el = document.getElementById('pane-sentences');
+  const gate3 = (gates || []).find(g => g.gate_name === 'answer_grounding');
+
+  if (!sentences || !sentences.length) {
+    el.innerHTML = `
+      ${gate3 ? renderGateCard(gate3, 'Gate 3 · 답변 근거 검사') : ''}
+      <div class="empty-section">답변 문장 데이터가 없습니다.</div>
+    `;
+    return;
+  }
+
+  const ungroundedCount = sentences.filter(s => !s.grounded).length;
+  el.innerHTML = `
+    ${gate3 ? renderGateCard(gate3, 'Gate 3 · 답변 근거 검사') : ''}
+    <div class="card">
+      <div class="card-title">답변 문장 분석 — ${sentences.length}개 문장, 근거 없음 ${ungroundedCount}개</div>
+      ${sentences.map(s => `
+        <div class="sentence-card${!s.grounded ? ' ungrounded' : ''}">
+          <div class="sentence-text">${esc(s.answer_sentence)}</div>
+          <div class="sentence-meta">
+            ${s.grounded
+              ? '<span class="chip chip-grounded">✓ 근거 있음</span>'
+              : '<span class="chip chip-ungrounded">✗ 근거 없음</span>'}
+            ${s.source_agent ? `<span class="chip chip-selected" style="font-size:10px">${esc(s.source_agent)}</span>` : ''}
+            ${s.source_tool  ? `<span class="chip chip-excluded" style="font-size:10px;border:1px solid #333">${esc(s.source_tool)}</span>` : ''}
+          </div>
+          ${s.evidence_summary ? `<div class="sentence-evidence">근거: ${esc(s.evidence_summary)}</div>` : ''}
+          ${s.warning_message  ? `<div class="warning-msg">⚠️ ${esc(s.warning_message)}</div>` : ''}
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+// ── Gate 결과 카드 렌더러 ────────────────────────────────────────────────
+function renderGateCard(gate, title) {
+  const cls = { PASS: 'gate-pill-pass', WARNING: 'gate-pill-warn', BLOCKED: 'gate-pill-block' }[gate.result] || '';
+  return `
+    <div class="gate-result-card" style="margin-bottom:14px">
+      <div class="gate-result-icon">${gateResultIcon(gate.result)}</div>
+      <div class="gate-result-body">
+        <div class="gate-result-name">
+          ${esc(title)}
+          <span class="badge ${cls === 'gate-pill-pass' ? 'badge-completed' : cls === 'gate-pill-warn' ? 'badge-warning' : 'badge-blocked'}"
+                style="margin-left:8px">${esc(gate.result)}</span>
+        </div>
+        ${gate.condition ? `<div class="gate-result-condition">조건: ${esc(gate.condition)}</div>` : ''}
+        ${gate.message ? `<div class="gate-result-msg">${esc(gate.message)}</div>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+// ── 탭 전환 ───────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activeTab = btn.dataset.tab;
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === `pane-${activeTab}`));
+  });
+});
+
+// ── 필터 버튼 ──────────────────────────────────────────────────────────────
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    currentFilter = btn.dataset.status;
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b === btn));
+    loadList();
+  });
+});
+
+// ── 자동 갱신 (3초) ──────────────────────────────────────────────────────
+async function autoRefresh() {
+  try {
+    const latest = await fetchLatest();
+    if (latest && latest !== latestKnown) {
+      latestKnown = latest;
+      await loadList(true);          // 목록만 조용히 갱신
+      // 현재 보고 있는 trace가 최신이면 상세도 갱신
+      if (currentTraceId === latest) {
+        const d = await fetchDetail(latest);
+        currentDetail = d;
+        renderDetail(d);
+      }
+    }
+  } catch (_) { /* 네트워크 오류 무시 */ }
+}
+
+// ── 초기 로드 ─────────────────────────────────────────────────────────────
+loadList();
+setInterval(autoRefresh, 3000);
+</script>
+</body>
+</html>

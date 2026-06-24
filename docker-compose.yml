@@ -1,0 +1,113 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Seoul}
+    container_name: ai-agent-frontend
+    ports:
+      - "13000:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:18000
+      NEXT_PUBLIC_APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Seoul}
+    depends_on:
+      backend:
+        condition: service_started
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-agent-backend
+    ports:
+      - "18000:8000"
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      mock-api:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+      - ./data:/data
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  postgres:
+    image: postgres:15
+    container_name: ai-agent-postgres
+    ports:
+      - "15433:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_agent_db}
+      POSTGRES_USER: ${POSTGRES_USER:-ai_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ai_agent_password}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ai_agent} -d ${POSTGRES_DB:-ai_agent_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: ai-agent-redis
+    ports:
+      - "6379:6379"
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: ai-agent-pgadmin
+    ports:
+      - "15050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    depends_on:
+      - postgres
+
+  mock-api:
+    build:
+      context: ./mock-api
+      dockerfile: Dockerfile
+    container_name: ai-agent-mock-api
+    ports:
+      - "18010:8010"
+    volumes:
+      - ./mock-api:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8010 --reload
+
+  # MVP 제외 서비스 (후속 Phase에서 활성화)
+  # worker:
+  #   build:
+  #     context: ./backend
+  #     dockerfile: Dockerfile
+  #   container_name: ai-agent-worker
+  #   env_file:
+  #     - .env
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_started
+  #   command: python -m app.worker.main
+
+  # admin-ui:
+  #   build:
+  #     context: ./admin-ui
+  #     dockerfile: Dockerfile
+  #   container_name: ai-agent-admin-ui
+  #   ports:
+  #     - "3000:3000"
+
+  # prometheus:
+  #   image: prom/prometheus
+  #   container_name: ai-agent-prometheus
+  #   ports:
+  #     - "9090:9090"
+
+# volumes 섹션 제거 — postgres는 ./data/postgres bind mount로 변경됨
