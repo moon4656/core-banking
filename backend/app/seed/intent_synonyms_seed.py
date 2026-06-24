@@ -145,6 +145,10 @@ INTENT_SYNONYMS = [
     {"intent": "MOCK_EXCHANGE_RATE_LOOKUP", "term": "JPY"},
     {"intent": "MOCK_EXCHANGE_RATE_LOOKUP", "term": "EUR"},
     {"intent": "MOCK_EXCHANGE_RATE_LOOKUP", "term": "CNY"},
+    {"intent": "MOCK_EXCHANGE_RATE_LOOKUP", "term": "기준환율"},
+    {"intent": "MOCK_EXCHANGE_RATE_LOOKUP", "term": "매매기준율"},
+    {"intent": "MOCK_EXCHANGE_RATE_LOOKUP", "term": "고시환율"},
+    {"intent": "MOCK_EXCHANGE_RATE_LOOKUP", "term": "환시세"},
 
     # MOCK_CURRENCY_EXCHANGE_CALC
     {"intent": "MOCK_CURRENCY_EXCHANGE_CALC", "term": "환전"},
@@ -154,12 +158,25 @@ INTENT_SYNONYMS = [
     {"intent": "MOCK_CURRENCY_EXCHANGE_CALC", "term": "달러로 바꾸면"},
     {"intent": "MOCK_CURRENCY_EXCHANGE_CALC", "term": "얼마나 받을 수 있"},
     {"intent": "MOCK_CURRENCY_EXCHANGE_CALC", "term": "환전 계산"},
+    {"intent": "MOCK_CURRENCY_EXCHANGE_CALC", "term": "환전 수수료"},
+    {"intent": "MOCK_CURRENCY_EXCHANGE_CALC", "term": "환전 우대"},
+    {"intent": "MOCK_CURRENCY_EXCHANGE_CALC", "term": "환율우대"},
+    {"intent": "MOCK_CURRENCY_EXCHANGE_CALC", "term": "외화 사기"},
+    {"intent": "MOCK_CURRENCY_EXCHANGE_CALC", "term": "달러 사기"},
+    {"intent": "MOCK_CURRENCY_EXCHANGE_CALC", "term": "원화로 바꾸기"},
 
     # MOCK_FOREIGN_REMITTANCE
     {"intent": "MOCK_FOREIGN_REMITTANCE", "term": "해외송금"},
     {"intent": "MOCK_FOREIGN_REMITTANCE", "term": "송금"},
     {"intent": "MOCK_FOREIGN_REMITTANCE", "term": "해외이체"},
     {"intent": "MOCK_FOREIGN_REMITTANCE", "term": "외화송금"},
+    {"intent": "MOCK_FOREIGN_REMITTANCE", "term": "국제송금"},
+    {"intent": "MOCK_FOREIGN_REMITTANCE", "term": "송금 한도"},
+    {"intent": "MOCK_FOREIGN_REMITTANCE", "term": "송금 수수료"},
+    {"intent": "MOCK_FOREIGN_REMITTANCE", "term": "송금 방법"},
+    {"intent": "MOCK_FOREIGN_REMITTANCE", "term": "송금 시간"},
+    {"intent": "MOCK_FOREIGN_REMITTANCE", "term": "SWIFT"},
+    {"intent": "MOCK_FOREIGN_REMITTANCE", "term": "스위프트"},
 
     # MOCK_FOREIGN_DEPOSIT_RATE
     {"intent": "MOCK_FOREIGN_DEPOSIT_RATE", "term": "외화예금"},
@@ -168,6 +185,13 @@ INTENT_SYNONYMS = [
     {"intent": "MOCK_FOREIGN_DEPOSIT_RATE", "term": "외화통장"},
     {"intent": "MOCK_FOREIGN_DEPOSIT_RATE", "term": "외화 금리"},
     {"intent": "MOCK_FOREIGN_DEPOSIT_RATE", "term": "달러 금리"},
+    {"intent": "MOCK_FOREIGN_DEPOSIT_RATE", "term": "달러 예금"},
+    {"intent": "MOCK_FOREIGN_DEPOSIT_RATE", "term": "외화 예금"},
+    {"intent": "MOCK_FOREIGN_DEPOSIT_RATE", "term": "달러 통장"},
+    {"intent": "MOCK_FOREIGN_DEPOSIT_RATE", "term": "외화 계좌"},
+    {"intent": "MOCK_FOREIGN_DEPOSIT_RATE", "term": "외화 정기예금"},
+    {"intent": "MOCK_FOREIGN_DEPOSIT_RATE", "term": "외화 보통예금"},
+    {"intent": "MOCK_FOREIGN_DEPOSIT_RATE", "term": "외화 예치"},
 
     # MOCK_NOTIFICATION_RULES
     {"intent": "MOCK_NOTIFICATION_RULES", "term": "알림"},

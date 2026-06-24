@@ -81,28 +81,28 @@ CONCEPTS = [
         "name": "환율",
         "description": "외화 환율 정보 및 변동 현황",
         "domain": "forex",
-        "aliases": ["환율", "exchange rate", "달러", "엔화", "유로", "위안", "외환", "USD", "JPY", "EUR", "CNY"],
+        "aliases": ["환율", "exchange rate", "달러", "엔화", "유로", "위안", "외환", "USD", "JPY", "EUR", "CNY", "기준환율", "매매기준율", "고시환율", "환시세"],
     },
     {
         "concept_id": "CONCEPT_FOREIGN_REMITTANCE",
         "name": "해외송금",
         "description": "해외로 외화를 송금하는 서비스",
         "domain": "forex",
-        "aliases": ["해외송금", "foreign remittance", "송금", "해외이체", "외화송금", "international transfer", "remittance"],
+        "aliases": ["해외송금", "foreign remittance", "송금", "해외이체", "외화송금", "international transfer", "remittance", "국제송금", "송금 한도", "송금 수수료", "송금 방법", "송금 시간", "SWIFT", "스위프트"],
     },
     {
         "concept_id": "CONCEPT_CURRENCY_EXCHANGE",
         "name": "외화환전",
         "description": "원화를 외화로 또는 외화를 원화로 환전하는 서비스",
         "domain": "forex",
-        "aliases": ["환전", "currency exchange", "외화환전", "달러환전", "엔화환전", "환전신청", "환전금액", "환전하면"],
+        "aliases": ["환전", "currency exchange", "외화환전", "달러환전", "엔화환전", "환전신청", "환전금액", "환전하면", "환전 수수료", "환전 우대", "환율우대", "외화 사기", "달러 사기", "원화로 바꾸기"],
     },
     {
         "concept_id": "CONCEPT_FOREIGN_DEPOSIT",
         "name": "외화예금",
         "description": "외화로 예금하는 상품 및 금리 정보",
         "domain": "forex",
-        "aliases": ["외화예금", "foreign deposit", "외화적금", "달러예금", "외화통장", "외화저축"],
+        "aliases": ["외화예금", "외화 예금", "foreign deposit", "외화적금", "달러예금", "달러 예금", "외화통장", "외화저축", "달러 통장", "외화 계좌", "외화 정기예금", "외화 보통예금", "외화 예치"],
     },
     # ── 알림 ──────────────────────────────────────────────────────
     {
