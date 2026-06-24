@@ -45,6 +45,7 @@ from app.agents.services.clarification_service_adapter import ClarificationServi
 from app.agents.services.concept_resolution_service import ConceptResolutionService
 from app.agents.services.execution_planner import ExecutionPlanner
 from app.agents.services.routing_policy import RoutingPolicy
+from app.agents.graph_builder import build_decision_graph
 from app.agents.forex_agent import ForexAgent
 from app.agents.notification_agent import NotificationAgent
 from app.agents.policy_agent import PolicyAgent
@@ -253,6 +254,7 @@ class LeaderAgent:
         self._answer_composer = AnswerComposer(summarize=self._summarize, extract_answer_slots=self._routing_policy.extract_answer_slots)
 
     async def run(self, db: Session, request_id: str, message: str, session_id: str | None, owner_name: str | None = None, owner_role: str | None = None) -> "LeaderResult":
+        run_timer = Timer()
         history = load_history(session_id)
         memory_turns = len(history) // 2
         record_event(db, request_id=request_id, event_type="MEMORY_LOADED", input_data={"session_id": session_id}, output_data={"turns_loaded": memory_turns})
@@ -264,7 +266,9 @@ class LeaderAgent:
             snapshot = pending
             pending, question = self._clarification_adapter.try_resolve(session_id=session_id, pending=pending, message=message)
             if question:
-                save_turn(session_id, message, question)
+                memory_save = save_turn(session_id, message, question)
+                if session_id:
+                    record_event(db, request_id=request_id, event_type="MEMORY_SAVED", input_data={"session_id": session_id}, output_data=memory_save)
                 return LeaderResult(plan=ExecutionPlan(request_id=request_id, message=message, detected_concepts=snapshot.get("detected_concepts", []), routed_agents=[], steps=[]), raw_results=[], ranked_results=[], intent=snapshot.get("intent_data", {}), memory_turns=memory_turns, answer=question, needs_clarification=True, clarification_question=question)
             if pending is None:
                 message = snapshot.get("original_message", message) + " " + message
@@ -273,7 +277,8 @@ class LeaderAgent:
         record_event(db, request_id=request_id, event_type="INTENT_ANALYZED", input_data={"message": message}, output_data=intent_data)
         resolved = self._concept_resolution_service.resolve(db=db, message=message, intent_keywords=intent_data.get("keywords", []))
         detected, all_concepts, detected_set = resolved.detected, resolved.all_concepts, resolved.detected_set
-        record_event(db, request_id=request_id, event_type="CONCEPT_DETECTED", input_data={"message": message}, output_data={"detected_concepts": detected, "expanded_concepts": [c for c in all_concepts if c not in detected_set], "total_concepts": all_concepts})
+        expanded_concepts = [concept_id for concept_id in all_concepts if concept_id not in detected_set]
+        record_event(db, request_id=request_id, event_type="CONCEPT_DETECTED", input_data={"message": message}, output_data={"detected_concepts": detected, "expanded_concepts": expanded_concepts, "total_concepts": all_concepts})
 
         routing = self._routing_policy.route(db=db, all_concepts=all_concepts, detected=detected, detected_set=detected_set, intent_keywords=intent_data.get("keywords", []))
         route_result = routing.route_result
@@ -287,12 +292,18 @@ class LeaderAgent:
             if missing_slots:
                 question = self._clarification_adapter.build_question(missing_slots[0])
                 self._clarification_adapter.save_pending(session_id, {"original_message": message, "intent_data": intent_data, "detected_concepts": list(detected_set), "missing_slots": missing_slots, "filled_slots": {}, "turns": 1})
-                save_turn(session_id, message, question)
+                memory_save = save_turn(session_id, message, question)
+                record_event(db, request_id=request_id, event_type="MEMORY_SAVED", input_data={"session_id": session_id}, output_data=memory_save)
                 return LeaderResult(plan=ExecutionPlan(request_id=request_id, message=message, detected_concepts=list(detected_set), routed_agents=[], steps=[]), raw_results=[], ranked_results=[], intent=intent_data, memory_turns=memory_turns, answer=question, needs_clarification=True, clarification_question=question)
 
         steps, seen_apis = self._execution_planner.build_steps(db, route_result)
         raw_results = []
         evidence_results = []
+        tool_execution_rows: list[dict] = []
+        evidence_map: dict[str, list[int]] = {}
+        agent_api_results: dict[str, list[dict]] = {}
+        agent_latencies: dict[str, int] = {}
+
         for route_item in route_result.routing:
             agent_cls = _AGENT_REGISTRY.get(route_item.agent_id)
             if not agent_cls:
@@ -301,6 +312,8 @@ class LeaderAgent:
             if not api_ids:
                 continue
             agent_output = await agent_cls().run(db, AgentInput(message=message, intent=intent_data, concept_ids=route_item.concept_ids, api_ids=api_ids, session_id=session_id or "", request_id=request_id))
+            agent_api_results[route_item.agent_id] = list(agent_output.api_results)
+            agent_latencies[route_item.agent_id] = sum((api_res.get("latency_ms") or 0) for api_res in agent_output.api_results)
             for api_res in agent_output.api_results:
                 raw_results.append(StepResult(api_id=api_res["api_id"], status=api_res["status"], data=api_res.get("data"), error=api_res.get("error")))
                 record_event(db, request_id=request_id, event_type="TOOL_INVOKED", agent_id=route_item.agent_id, tool_id=api_res["api_id"], input_data={"api_id": api_res["api_id"]}, output_data={"status": api_res["status"]})
@@ -312,32 +325,131 @@ class LeaderAgent:
                         source_id=api_res["api_id"],
                         content=api_res.get("data"),
                         intent=intent_data.get("intent", INTENT_INQUIRY),
-                        response_latency_ms=0,
+                        response_latency_ms=api_res.get("latency_ms") or 0,
                         agent_id=route_item.agent_id,
                     )
+                    evidence_map.setdefault(api_res["api_id"], []).append(evidence.id)
                     evidence_results.append({
                         "api_id": api_res["api_id"],
                         "evidence_id": evidence.id,
                         "confidence_score": evidence.confidence_score,
                     })
+                tool_execution_rows.append(
+                    {
+                        "agent_id": route_item.agent_id,
+                        "tool_code": api_res["api_id"],
+                        "concept_ids": route_item.concept_ids,
+                        "input_summary": f"message={message[:80]}",
+                        "output_summary": self._summarize_tool_output(api_res.get("data")),
+                        "status": api_res["status"],
+                        "latency_ms": api_res.get("latency_ms"),
+                        "error_summary": api_res.get("error"),
+                        "evidence_ids": evidence_map.get(api_res["api_id"], []),
+                    }
+                )
 
         link_related_evidence(db, request_id)
 
         plan = self._execution_planner.build_plan(request_id=request_id, message=message, detected_concepts=all_concepts, routed_agents=routed_agents, steps=steps)
         record_event(db, request_id=request_id, event_type="PLAN_CREATED", output_data={"step_count": len(steps), "api_ids": list(seen_apis)})
         ranked_results = self._rerank(raw_results, intent_data)
-        answer, ranked_results, answer_slots, _ = await self._answer_composer.compose(db=db, request_id=request_id, message=message, intent_data=intent_data, classified=classified_concepts, raw_results=ranked_results, history=history, ltm_history=ltm_history)
+        answer, ranked_results, answer_slots, slot_rankings = await self._answer_composer.compose(db=db, request_id=request_id, message=message, intent_data=intent_data, classified=classified_concepts, raw_results=ranked_results, history=history, ltm_history=ltm_history)
 
         from app.agents.validator import ValidationChecker
         validation = ValidationChecker().run_all(answer=answer, evidence_results=evidence_results, intent=intent_data.get("intent", INTENT_INQUIRY), user_role=owner_role or "READONLY")
         if validation.sanitized_answer is not None:
             answer = validation.sanitized_answer
 
-        save_turn(session_id, message, answer)
+        memory_save = save_turn(session_id, message, answer)
+        if session_id:
+            record_event(db, request_id=request_id, event_type="MEMORY_SAVED", input_data={"session_id": session_id}, output_data=memory_save)
+
+        ltm_save = {
+            "saved": False,
+            "reason": "missing_session_id" if not session_id else "not_attempted",
+            "turn_index": None,
+            "question_summary": "",
+            "answer_summary": "",
+        }
         try:
-            save_long_term_memory(db=db, session_id=session_id, intent=intent_data.get("intent", INTENT_INQUIRY), detected_concepts=all_concepts, keywords=intent_data.get("keywords", []), question=message, answer=answer, user_id=owner_name, question_summary=message[:300], answer_summary=answer[:500])
+            ltm_save = save_long_term_memory(db=db, session_id=session_id, intent=intent_data.get("intent", INTENT_INQUIRY), detected_concepts=all_concepts, keywords=intent_data.get("keywords", []), question=message, answer=answer, user_id=owner_name, question_summary=message[:300], answer_summary=answer[:500])
         except Exception:
             pass
+        if session_id:
+            record_event(db, request_id=request_id, event_type="LTM_SAVED", input_data={"session_id": session_id, "user_id": owner_name}, output_data=ltm_save)
+
+        request_meta = {
+            "channel": "chat",
+            "owner_name": owner_name,
+            "owner_role": owner_role,
+            "session_id": session_id,
+        }
+        memory_summary = {
+            "short_memory": {
+                "loaded": bool(history),
+                "summary": f"{memory_turns} turns loaded" if history else None,
+                "items_count": len(history),
+                "impact": ["Used recent conversation context"] if history else [],
+                "items": history,
+            },
+            "long_term_memory": {
+                "loaded": bool(ltm_history),
+                "summary": f"{len(ltm_history)} long-term entries loaded" if ltm_history else None,
+                "items_count": len(ltm_history),
+                "impact": ["Used historical counseling summaries"] if ltm_history else [],
+                "items": ltm_history,
+            },
+        }
+        intent_confidence = (sum(1 for r in raw_results if r.status == "success") / len(raw_results) if raw_results else 0.0)
+        latency_summary = {
+            "total_ms": run_timer.elapsed_ms(),
+            "tool_count": len(tool_execution_rows),
+            "memory_turns": memory_turns,
+            "ltm_turns": len(ltm_history),
+        }
+
+        save_decision_trace_core(
+            db,
+            request_id=request_id,
+            session_id=session_id,
+            owner_name=owner_name,
+            owner_role=owner_role,
+            user_query=message,
+            normalized_query=" ".join(message.split()),
+            request_meta=request_meta,
+            memory_summary=memory_summary,
+            intent_analysis={
+                "intent": intent_data.get("intent"),
+                "confidence": intent_confidence,
+                "keywords": intent_data.get("keywords", []),
+                "urgency": intent_data.get("urgency"),
+                "reason": f"Derived from message and context keywords: {intent_data.get('keywords', [])}",
+            },
+            latency=latency_summary,
+            status="completed",
+        )
+        save_concept_detections(db, request_id, routing.concept_trace_rows)
+        save_agent_selection_rows(db, request_id, routing.agent_selection_rows)
+        save_tool_execution_rows(db, request_id, tool_execution_rows)
+        save_reranking_trace(
+            db,
+            request_id=request_id,
+            criteria_weights={"focus_match": 0.5, "success": 0.3, "intent_relevance": 0.2},
+            candidates=[
+                {"api_id": result.api_id, "status": result.status, "has_data": bool(result.data)}
+                for result in ranked_results
+            ],
+            selected_evidence_ids=[item["evidence_id"] for item in evidence_results],
+            reason="Ranked results filtered toward question focus and successful grounded outputs",
+        )
+        save_final_answer_trace(
+            db,
+            request_id=request_id,
+            answer=answer,
+            answer_summary=answer[:500],
+            used_evidence_ids=[item["evidence_id"] for item in evidence_results],
+            grounding_summary=f"Grounded by {len(evidence_results)} evidence items across {len(tool_execution_rows)} tool executions",
+        )
 
         db.add(
             LeaderDecision(
@@ -345,13 +457,13 @@ class LeaderAgent:
                 detected_intent=intent_data.get("intent"),
                 detected_concepts=all_concepts,
                 direct_concepts=detected,
-                expanded_concepts=[c for c in all_concepts if c not in detected_set],
+                expanded_concepts=expanded_concepts,
                 selected_agents=routed_agents,
                 reasoning={
                     "leader_reason": "Concept-to-agent routing completed",
                     "unrouted_concepts": route_result.unrouted_concept_ids,
                 },
-                confidence_score=(sum(1 for r in raw_results if r.status == "success") / len(raw_results) if raw_results else 0.0),
+                confidence_score=intent_confidence,
                 total_steps=len(steps),
                 memory_turns=memory_turns,
                 ltm_turns=len(ltm_history),
@@ -359,9 +471,43 @@ class LeaderAgent:
             )
         )
         db.commit()
+        build_decision_graph(
+            db,
+            request_id=request_id,
+            message=message,
+            session_id=session_id,
+            memory_turns=memory_turns,
+            ltm_turns=len(ltm_history),
+            intent_data=intent_data,
+            intent_ms=0,
+            detected=detected,
+            all_concepts=all_concepts,
+            detected_set=detected_set,
+            route_result=route_result,
+            routed_agents=routed_agents,
+            agent_api_results=agent_api_results,
+            agent_latencies=agent_latencies,
+            ranked_results=ranked_results,
+            answer=answer,
+            confidence=intent_confidence,
+            llm_enabled=self._llm_enabled,
+            short_memory_save=memory_save,
+            long_term_memory_save=ltm_save,
+        )
+        record_event(db, request_id=request_id, event_type="RESPONSE_COMPLETED", output_data={"selected_agents": routed_agents, "answer_length": len(answer)})
 
-        decision_v2 = self._build_decision_v2(request_id=request_id, session_id=session_id, user_query=message, memory_turns=memory_turns, ltm_turns=len(ltm_history), intent_data=intent_data, intent_confidence=(sum(1 for r in raw_results if r.status == "success") / len(raw_results) if raw_results else 0.0), classified=classified_concepts, triggered_rules=routing.triggered_rules, selected_agents_v2=routing.selected_agents_v2, rejected_agents_v2=routing.rejected_agents_v2, answer_slots=answer_slots, slot_rankings=rank_evidence_by_slots(answer_slots, evidence_results), risk_flags=validation.risk_flags, actions_taken=validation.actions_taken, requires_disclaimer=validation.requires_disclaimer)
+        decision_v2 = self._build_decision_v2(request_id=request_id, session_id=session_id, user_query=message, memory_turns=memory_turns, ltm_turns=len(ltm_history), intent_data=intent_data, intent_confidence=intent_confidence, classified=classified_concepts, triggered_rules=routing.triggered_rules, selected_agents_v2=routing.selected_agents_v2, rejected_agents_v2=routing.rejected_agents_v2, answer_slots=answer_slots, slot_rankings=rank_evidence_by_slots(answer_slots, evidence_results), risk_flags=validation.risk_flags, actions_taken=validation.actions_taken, requires_disclaimer=validation.requires_disclaimer)
         return LeaderResult(plan=plan, raw_results=raw_results, ranked_results=ranked_results, intent=intent_data, memory_turns=memory_turns, answer=answer, decision_v2=decision_v2, needs_clarification=False, clarification_question=None)
+
+    def _summarize_tool_output(self, data: dict | list | None) -> str | None:
+        if data is None:
+            return None
+        if isinstance(data, list):
+            return f"list[{len(data)}]"
+        if isinstance(data, dict):
+            keys = list(data.keys())[:5]
+            return f"dict keys={keys}"
+        return str(data)[:200]
 
     async def _summarize_for_long_term(
         self,
