@@ -313,4 +313,6 @@ POST /api/v1/ai/chat
 3. `backend/app/seed/agents_seed.py`
 4. `backend/app/seed/mappings_seed.py`
 5. 필요 시 `backend/app/seed/tools_seed.py`
-6. 관련 테스트와 문서
+6. 카테고리별 평가 시나리오 또는 DB 기반 eval scenario catalog 등록
+7. 해당 Agent smoke 테스트와 전체 회귀 테스트 실행
+8. 관련 테스트와 문서
